@@ -1,7 +1,9 @@
 import dxfgrabber
 from fpdf import FPDF
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import argparse
+import copy
 
 @dataclass
 class Params:
@@ -69,8 +71,10 @@ class Arc:
 
     def bounds(self):
         cx, cy = self.center.x, self.center.y
-        max_x = min_x = cx
-        max_y = min_y = cy
+        max_x = -math.inf
+        min_x = math.inf
+        max_y = -math.inf
+        min_y = math.inf
 
         angles = [self.start_angle, self.end_angle]
         wrap = self.start_angle > self.end_angle
@@ -80,6 +84,7 @@ class Arc:
                 (wrap and self.start_angle <= extra_angle)):
                 angles.append(extra_angle)
 
+        # print(f'{angles=}')
         for angle in angles:
             x = cx + self.r*math.cos(angle * math.pi/180)
             y = cy + self.r*math.sin(angle * math.pi/180)
@@ -139,15 +144,23 @@ def draw_page(params: Params, entities, pdf, bb: Point, offset: Point):
     cuty = (params.page_h - params.overlap)/params.scale
     num_cutsx = math.ceil(bb.x/cutx)
     num_cutsy = math.ceil(bb.y/cuty)
-    for i in range(num_cutsx):
-        for j in range(num_cutsy):
+    for i in range(num_cutsx+1):
+        for j in range(num_cutsy+1):
             x = i*cutx
             y = j*cuty
             draw_line(x-0.25/params.scale, y, x+0.25/params.scale, y)
             draw_line(x, y-0.25/params.scale, x, y+0.25/params.scale)
 
 def main():
-    dxf = dxfgrabber.readfile("test.dxf")
+    parser = argparse.ArgumentParser(description='Convert DXF to PDF')
+    parser.add_argument('dxf', type=str, help='DXF file to convert')
+    parser.add_argument('--pdf', required=True, type=str, help='PDF file to output')
+    parser.add_argument('--scale', required=True, type=float, help='Scale factor')
+    parser.add_argument('--overlap', type=float, default=0.5, help='Overlap factor')
+
+    args = parser.parse_args()
+
+    dxf = dxfgrabber.readfile(args.dxf)
     bb = RectXY(bl = Point(math.inf, math.inf), 
                 tr = Point(-math.inf, -math.inf))
     entities = []
@@ -155,28 +168,37 @@ def main():
         if e.dxftype == 'LINE':
             entity = Line.from_dxf(e)
             entities.append(Line.from_dxf(e))
-        if e.dxftype == 'ARC':
+        elif e.dxftype == 'ARC':
             entity = Arc.from_dxf(e)
+        else:
+            raise ValueError(f"Unsupported entity type: {e.dxftype}")
 
         entities.append(entity)
-        bb = update_bounds(bb, entity.bounds())
+        bounds = entity.bounds()
+        print(f'{entity} -> {bounds.bl.y} -> {bounds.tr.y}')
+        bb = update_bounds(bb, bounds)
 
     for e in entities:
         e.offset(bb.bl)
-        print(e)
 
-    bb.offset(bb.bl)
+    print(f"Bounding box: {bb}")
+    bb.offset(replace(bb.bl))
+    print(f"Bounding box: {bb}")
+    orientation = "landscape" if bb.tr.x > bb.tr.y else "portrait"
 
-    pdf = FPDF(orientation="landscape", unit="in", format="letter")
+    pdf = FPDF(orientation=orientation, unit="in", format="letter")
     pdf.set_line_width(0.5/25.4)
     pdf.set_font("Helvetica", "B", 8) 
 
-    params = Params(overlap=1.0)
+    params = Params(overlap=args.overlap, scale=args.scale, orientation=orientation)
+    print(params)
+    print(f'''Page size: {params.page_w} x {params.page_h}''')
 
     cutx = (params.page_w - params.overlap)/params.scale
     cuty = (params.page_h - params.overlap)/params.scale
-    num_cutsx = math.floor(bb.tr.x/cutx)
-    num_cutsy = math.floor(bb.tr.y/cuty)
+    num_cutsx = math.ceil(bb.tr.x/cutx)
+    num_cutsy = math.ceil(bb.tr.y/cuty)
+    print(f"Cutting into {num_cutsx} x {num_cutsy} pages")
     for i in range(num_cutsx):
         for j in range(num_cutsy):
             x = i*cutx
@@ -188,9 +210,12 @@ def main():
                                params.page_h - 2*params.margin):
                 draw_page(params, entities, pdf, bb.tr, Point(-x, -y))
 
-            pdf.text(0.125, 0.125, text=f'({i}, {j})')
+            pdf.text(0.3, 0.4, text=f'({i}, {j})')
 
-    pdf.output("test.pdf")
+    pdf.output(args.pdf)
 
-# print(compute_arc_bounds(180, 90, (0, 0, 0), 1))
+
+# arc = Arc(center=Point(x=2.999999999999995, y=39.27596614930593), r=30.7812500000007, start_angle=270.0, end_angle=273.7253958543048)
+# print(arc.bounds())
+
 main()
