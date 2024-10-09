@@ -20,6 +20,9 @@ class Params:
             self.page_h = 11
             self.page_w = 8.5
 
+        self.cutx = (self.page_w - self.overlap - 2*self.margin)/self.scale
+        self.cuty = (self.page_h - self.overlap - 2*self.margin)/self.scale
+
 @dataclass
 class Point:
     x: float = 0.0
@@ -120,18 +123,14 @@ def draw_page(params: Params, entities, pdf, bb: Point, offset: Point):
         pdf.arc(x=cx-r+params.margin, y=params.page_h-(cy+r)-params.margin, a=2*r, b=2*r,
                 end_angle=360-e.start_angle, start_angle=360-e.end_angle)
 
-    pdf.set_draw_color(r=255, g=150, b=150)
+    pdf.set_draw_color(200)
 
     bb_r = min(bb.x, bb.y)
-    for i in range(math.ceil(params.scale*bb.x)+1):
-        for j in range(math.ceil(params.scale*bb.y)+1):
-            x1 = i/params.scale
-            y1 = j/params.scale
-            x2 = x1 + bb_r
-            y2 = y1 + bb_r
-            y3 = y1 - bb_r
-            draw_line(x1, y1, x2, y2)
-            draw_line(x1, y1, x2, y3)
+    for i in range(math.ceil(params.scale*(bb.x+2*bb_r))+1):
+        x1 = i/params.scale - bb_r
+        x2 = x1 + bb_r
+        draw_line(x1, 0, x2, bb_r)
+        draw_line(x1, bb_r, x2, 0)
 
     pdf.set_draw_color(r=0, g=0, b=0)
     for e in entities:
@@ -140,14 +139,12 @@ def draw_page(params: Params, entities, pdf, bb: Point, offset: Point):
         if isinstance(e, Arc):
             draw_arc(e)
 
-    cutx = (params.page_w - params.overlap)/params.scale
-    cuty = (params.page_h - params.overlap)/params.scale
-    num_cutsx = math.ceil(bb.x/cutx)
-    num_cutsy = math.ceil(bb.y/cuty)
+    num_cutsx = math.ceil(bb.x/params.cutx)
+    num_cutsy = math.ceil(bb.y/params.cuty)
     for i in range(num_cutsx+1):
         for j in range(num_cutsy+1):
-            x = i*cutx
-            y = j*cuty
+            x = i*params.cutx
+            y = j*params.cuty
             draw_line(x-0.25/params.scale, y, x+0.25/params.scale, y)
             draw_line(x, y-0.25/params.scale, x, y+0.25/params.scale)
 
@@ -175,13 +172,12 @@ def main():
 
         entities.append(entity)
         bounds = entity.bounds()
-        print(f'{entity} -> {bounds.bl.y} -> {bounds.tr.y}')
+        # print(f'{entity} -> {bounds.bl.y} -> {bounds.tr.y}')
         bb = update_bounds(bb, bounds)
 
     for e in entities:
         e.offset(bb.bl)
 
-    print(f"Bounding box: {bb}")
     bb.offset(replace(bb.bl))
     print(f"Bounding box: {bb}")
     orientation = "landscape" if bb.tr.x > bb.tr.y else "portrait"
@@ -194,20 +190,20 @@ def main():
     print(params)
     print(f'''Page size: {params.page_w} x {params.page_h}''')
 
-    cutx = (params.page_w - params.overlap)/params.scale
-    cuty = (params.page_h - params.overlap)/params.scale
-    num_cutsx = math.ceil(bb.tr.x/cutx)
-    num_cutsy = math.ceil(bb.tr.y/cuty)
+    num_cutsx = math.ceil(bb.tr.x/params.cutx)
+    num_cutsy = math.ceil(bb.tr.y/params.cuty)
+    print(f"cutx: {params.cutx}, cuty: {params.cuty}")
     print(f"Cutting into {num_cutsx} x {num_cutsy} pages")
     for i in range(num_cutsx):
         for j in range(num_cutsy):
-            x = i*cutx
-            y = j*cuty
+            x = i*params.cutx
+            y = j*params.cuty
 
             pdf.add_page()
-            with pdf.rect_clip(params.margin, params.margin, 
-                               params.page_w - 2*params.margin, 
-                               params.page_h - 2*params.margin):
+            tol = 0.5/25.4
+            with pdf.rect_clip(params.margin-tol, params.margin-tol, 
+                               params.page_w+2*tol - 2*params.margin, 
+                               params.page_h+2*tol - 2*params.margin):
                 draw_page(params, entities, pdf, bb.tr, Point(-x, -y))
 
             pdf.text(0.3, 0.4, text=f'({i}, {j})')
