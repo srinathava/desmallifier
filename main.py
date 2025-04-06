@@ -195,8 +195,9 @@ def draw_page(params: Params, entities, pdf, bb: Point, offset: Point):
         # Use arc for both full and partial ellipses
         pdf.arc(x=cx-major_length, y=cy-minor_length,
                 a=2*major_length, b=2*minor_length,
-                start_angle=360-end_angle, end_angle=360-start_angle,
-                inclination=rotation_deg)
+                start_angle=start_angle, end_angle=end_angle,
+                inclination=rotation_deg,
+                clockwise=True)
 
     pdf.set_draw_color(200)
 
