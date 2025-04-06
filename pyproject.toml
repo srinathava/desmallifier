@@ -1,0 +1,15 @@
+[project]
+name = "desmallifier"
+version = "0.1.0"
+dependencies = [
+    "defusedxml",
+    "dxfgrabber",
+    "fonttools",
+    "fpdf2",
+    "pillow",
+]
+
+[project.scripts]
+desmallifier = "main:main"
+
+
