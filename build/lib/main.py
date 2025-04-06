@@ -3,7 +3,7 @@ from fpdf import FPDF
 import math
 from dataclasses import dataclass, replace
 import argparse
-import copy
+import numpy as np
 
 @dataclass
 class Params:
@@ -101,6 +101,59 @@ class Arc:
     def offset(self, offset: Point):
         self.center.offset(offset)
 
+@dataclass
+class Ellipse:
+    center: Point
+    major_axis: Point  # Vector from center to major axis endpoint
+    ratio: float = 0.0  # Ratio of minor axis to major axis
+    start_param: float = 0.0  # Start parameter in radians
+    end_param: float = 0.0  # End parameter in radians
+    
+    @staticmethod
+    def from_dxf(e):
+        center = Point(e.center[0], e.center[1])
+        # Major axis is stored as a vector from center
+        major_axis = Point(e.major_axis[0], e.major_axis[1])
+        return Ellipse(center=center,
+                      major_axis=major_axis,
+                      ratio=e.ratio,
+                      start_param=e.start_param,
+                      end_param=e.end_param)
+    
+    def bounds(self, num_points=1000):
+        # Extract ellipse data
+        cx, cy = self.center.x, self.center.y
+        dx, dy = self.major_axis.x, self.major_axis.y
+        a = np.hypot(dx, dy)
+        b = a * self.ratio
+        theta = np.arctan2(dy, dx)
+
+        # Normalize angles
+        start = self.start_param % (2 * np.pi)
+        end = self.end_param % (2 * np.pi)
+        if end <= start:
+            end += 2 * np.pi
+
+        # Sample points
+        t = np.linspace(start, end, num_points)
+        x_ = a * np.cos(t)
+        y_ = b * np.sin(t)
+
+        # Rotate points by θ and shift to center
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+        x = x_ * cos_theta - y_ * sin_theta + cx
+        y = x_ * sin_theta + y_ * cos_theta + cy
+
+        # Compute bounding box
+        min_x, max_x = np.min(x), np.max(x)
+        min_y, max_y = np.min(y), np.max(y)
+
+        return RectXY(Point(min_x, min_y), Point(max_x, max_y))
+        
+    def offset(self, offset: Point):
+        self.center.offset(offset)
+
 def update_bounds(bb1: RectXY, bb2: RectXY):
     bl = Point(min(bb1.bl.x, bb2.bl.x), min(bb1.bl.y, bb2.bl.y))
     tr = Point(max(bb1.tr.x, bb2.tr.x), max(bb1.tr.y, bb2.tr.y))
@@ -122,6 +175,28 @@ def draw_page(params: Params, entities, pdf, bb: Point, offset: Point):
         r = params.scale*e.r
         pdf.arc(x=cx-r+params.margin, y=params.page_h-(cy+r)-params.margin, a=2*r, b=2*r,
                 end_angle=360-e.start_angle, start_angle=360-e.end_angle)
+    
+    def draw_ellipse(e: Ellipse):
+        # Get center point in PDF coordinates
+        cx = params.scale*(e.center.x+ox) + params.margin
+        cy = params.page_h - params.scale*(e.center.y+oy) - params.margin
+        
+        # Calculate major and minor axis lengths
+        major_length = params.scale * math.sqrt(e.major_axis.x**2 + e.major_axis.y**2)
+        minor_length = major_length * e.ratio
+        
+        # Calculate rotation angle of the ellipse in degrees
+        rotation_deg = math.atan2(e.major_axis.y, e.major_axis.x) * 180 / math.pi
+        
+        # Convert parameters from radians to degrees
+        start_angle = math.degrees(e.start_param)
+        end_angle = math.degrees(e.end_param)
+        
+        # Use arc for both full and partial ellipses
+        pdf.arc(x=cx-major_length, y=cy-minor_length,
+                a=2*major_length, b=2*minor_length,
+                start_angle=360-end_angle, end_angle=360-start_angle,
+                inclination=rotation_deg)
 
     pdf.set_draw_color(200)
 
@@ -138,6 +213,8 @@ def draw_page(params: Params, entities, pdf, bb: Point, offset: Point):
             draw_line(e.start.x, e.start.y, e.end.x, e.end.y)
         if isinstance(e, Arc):
             draw_arc(e)
+        if isinstance(e, Ellipse):
+            draw_ellipse(e)
 
     num_cutsx = math.ceil(bb.x/params.cutx)
     num_cutsy = math.ceil(bb.y/params.cuty)
@@ -154,8 +231,14 @@ def main():
     parser.add_argument('--pdf', required=True, type=str, help='PDF file to output')
     parser.add_argument('--scale', required=True, type=float, help='Scale factor')
     parser.add_argument('--overlap', type=float, default=0.5, help='Overlap factor')
+    parser.add_argument('--debug', action='store_true', help='Debug mode')
 
     args = parser.parse_args()
+    if args.debug:
+        import debugpy
+        print("Waiting for debugger to attach...")
+        debugpy.listen(5678)
+        debugpy.wait_for_client()
 
     dxf = dxfgrabber.readfile(args.dxf)
     bb = RectXY(bl = Point(math.inf, math.inf), 
@@ -164,9 +247,13 @@ def main():
     for e in dxf.entities:
         if e.dxftype == 'LINE':
             entity = Line.from_dxf(e)
-            entities.append(Line.from_dxf(e))
         elif e.dxftype == 'ARC':
             entity = Arc.from_dxf(e)
+        elif e.dxftype == 'ELLIPSE':
+            entity = Ellipse.from_dxf(e)
+        elif e.dxftype == 'MTEXT':
+            print(f"Skipping MTEXT: {e.raw_text}")
+            continue
         else:
             raise ValueError(f"Unsupported entity type: {e.dxftype}")
 

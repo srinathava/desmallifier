@@ -6,6 +6,7 @@ dependencies = [
     "dxfgrabber",
     "fonttools",
     "fpdf2",
+    "numpy",
     "pillow",
 ]
 
