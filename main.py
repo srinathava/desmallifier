@@ -1,4 +1,4 @@
-import dxfgrabber
+import ezdxf
 from fpdf import FPDF
 import math
 from dataclasses import dataclass, replace
@@ -146,8 +146,8 @@ class Ellipse:
         y = x_ * sin_theta + y_ * cos_theta + cy
 
         # Compute bounding box
-        min_x, max_x = np.min(x), np.max(x)
-        min_y, max_y = np.min(y), np.max(y)
+        min_x, max_x = np.min(x).item(), np.max(x).item()
+        min_y, max_y = np.min(y).item(), np.max(y).item()
 
         return RectXY(Point(min_x, min_y), Point(max_x, max_y))
         
@@ -201,7 +201,7 @@ def draw_page(params: Params, entities, pdf, bb: Point, offset: Point):
 
     pdf.set_draw_color(200)
 
-    bb_r = min(bb.x, bb.y)
+    bb_r = max(bb.x, bb.y)
     for i in range(math.ceil(params.scale*(bb.x+2*bb_r))+1):
         x1 = i/params.scale - bb_r
         x2 = x1 + bb_r
@@ -241,27 +241,37 @@ def main():
         debugpy.listen(5678)
         debugpy.wait_for_client()
 
-    dxf = dxfgrabber.readfile(args.dxf)
-    bb = RectXY(bl = Point(math.inf, math.inf), 
+    dxf = ezdxf.readfile(args.dxf)
+    bb = RectXY(bl = Point(math.inf, math.inf),
                 tr = Point(-math.inf, -math.inf))
     entities = []
-    for e in dxf.entities:
-        if e.dxftype == 'LINE':
-            entity = Line.from_dxf(e)
-        elif e.dxftype == 'ARC':
-            entity = Arc.from_dxf(e)
-        elif e.dxftype == 'ELLIPSE':
-            entity = Ellipse.from_dxf(e)
-        elif e.dxftype == 'MTEXT':
-            print(f"Skipping MTEXT: {e.raw_text}")
-            continue
-        else:
-            raise ValueError(f"Unsupported entity type: {e.dxftype}")
+    def add_entity(e):
+        nonlocal bb, entities
 
-        entities.append(entity)
-        bounds = entity.bounds()
+        entities.append(e)
+        bounds = e.bounds()
         # print(f'{entity} -> {bounds.bl.y} -> {bounds.tr.y}')
         bb = update_bounds(bb, bounds)
+
+    for e in dxf.modelspace():
+        dxftype = e.dxftype()
+        if dxftype == 'LINE':
+            add_entity(Line.from_dxf(e.dxf))
+        elif dxftype == 'ARC':
+            add_entity(Arc.from_dxf(e.dxf))
+        elif dxftype == 'ELLIPSE':
+            add_entity(Ellipse.from_dxf(e.dxf))
+        elif dxftype == 'SPLINE':
+            points = list(e.construction_tool().flattening(distance=0.001))
+            for (p1, p2) in zip(points[:-1], points[1:]):
+                add_entity(Line(start=Point(p1[0], p1[1]), end=Point(p2[0], p2[1])))
+
+        elif dxftype == 'MTEXT':
+            print(f"Skipping MTEXT: {e.text}")
+            continue
+        else:
+            raise ValueError(f"Unsupported entity type: {dxftype}")
+        
 
     for e in entities:
         e.offset(bb.bl)
