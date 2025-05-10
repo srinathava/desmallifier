@@ -4,6 +4,11 @@ import math
 from dataclasses import dataclass, replace
 import argparse
 import numpy as np
+import os
+import tempfile
+import PyPDF2
+from pdf2image import convert_from_path
+from PIL import Image, ImageStat
 
 @dataclass
 class Params:
@@ -159,30 +164,54 @@ def update_bounds(bb1: RectXY, bb2: RectXY):
     tr = Point(max(bb1.tr.x, bb2.tr.x), max(bb1.tr.y, bb2.tr.y))
     return RectXY(bl, tr)
 
-def draw_page(params: Params, entities, pdf, bb: Point, offset: Point):
-    ox = offset.x
-    oy = offset.y
-
-    def draw_line(x1, y1, x2, y2):
-        pdf.line(x1=params.scale*(x1+ox)+params.margin, 
-                 y1=params.page_h-params.scale*(y1+oy)-params.margin,
-                 x2=params.scale*(x2+ox)+params.margin,
-                 y2=params.page_h-params.scale*(y2+oy)-params.margin)
-
-    def draw_arc(e: Arc):
-        cx = params.scale*(e.center.x+ox)
-        cy = params.scale*(e.center.y+oy)
-        r = params.scale*e.r
-        pdf.arc(x=cx-r+params.margin, y=params.page_h-(cy+r)-params.margin, a=2*r, b=2*r,
-                end_angle=360-e.start_angle, start_angle=360-e.end_angle)
+class PDFDrawer:
+    """Class for drawing geometric entities on a PDF."""
     
-    def draw_ellipse(e: Ellipse):
+    def __init__(self, params: Params, pdf, offset: Point):
+        """
+        Initialize the PDFDrawer with parameters needed for drawing.
+        
+        Args:
+            params: Drawing parameters (scale, page dimensions, margins)
+            pdf: FPDF object to draw on
+            offset: Offset point for drawing coordinates
+        """
+        self.params = params
+        self.pdf = pdf
+        self.ox = offset.x
+        self.oy = offset.y
+    
+    def draw_line(self, x1, y1, x2, y2):
+        """Draw a line on the PDF with appropriate scaling and offset."""
+        self.pdf.line(
+            x1=self.params.scale*(x1+self.ox)+self.params.margin,
+            y1=self.params.page_h-self.params.scale*(y1+self.oy)-self.params.margin,
+            x2=self.params.scale*(x2+self.ox)+self.params.margin,
+            y2=self.params.page_h-self.params.scale*(y2+self.oy)-self.params.margin
+        )
+
+    def draw_arc(self, e: Arc):
+        """Draw an arc on the PDF with appropriate scaling and offset."""
+        cx = self.params.scale*(e.center.x+self.ox)
+        cy = self.params.scale*(e.center.y+self.oy)
+        r = self.params.scale*e.r
+        self.pdf.arc(
+            x=cx-r+self.params.margin,
+            y=self.params.page_h-(cy+r)-self.params.margin,
+            a=2*r,
+            b=2*r,
+            end_angle=360-e.start_angle,
+            start_angle=360-e.end_angle
+        )
+    
+    def draw_ellipse(self, e: Ellipse):
+        """Draw an ellipse on the PDF with appropriate scaling and offset."""
         # Get center point in PDF coordinates
-        cx = params.scale*(e.center.x+ox) + params.margin
-        cy = params.page_h - params.scale*(e.center.y+oy) - params.margin
+        cx = self.params.scale*(e.center.x+self.ox) + self.params.margin
+        cy = self.params.page_h - self.params.scale*(e.center.y+self.oy) - self.params.margin
         
         # Calculate major and minor axis lengths
-        major_length = params.scale * math.sqrt(e.major_axis.x**2 + e.major_axis.y**2)
+        major_length = self.params.scale * math.sqrt(e.major_axis.x**2 + e.major_axis.y**2)
         minor_length = major_length * e.ratio
         
         # Calculate rotation angle of the ellipse in degrees
@@ -193,38 +222,92 @@ def draw_page(params: Params, entities, pdf, bb: Point, offset: Point):
         end_angle = math.degrees(e.end_param)
         
         # Use arc for both full and partial ellipses
-        pdf.arc(x=cx-major_length, y=cy-minor_length,
-                a=2*major_length, b=2*minor_length,
-                start_angle=start_angle, end_angle=end_angle,
-                inclination=rotation_deg,
-                clockwise=True)
+        self.pdf.arc(
+            x=cx-major_length,
+            y=cy-minor_length,
+            a=2*major_length,
+            b=2*minor_length,
+            start_angle=start_angle,
+            end_angle=end_angle,
+            inclination=rotation_deg,
+            clockwise=True
+        )
+    
+    def draw_entity(self, e):
+        """Draw an entity based on its type."""
+        if isinstance(e, Line):
+            self.draw_line(e.start.x, e.start.y, e.end.x, e.end.y)
+        elif isinstance(e, Arc):
+            self.draw_arc(e)
+        elif isinstance(e, Ellipse):
+            self.draw_ellipse(e)
 
+
+def draw_page(params: Params, entities, pdf, offset: Point):
+    """Draw entities on a PDF page using PDFDrawer."""
+    drawer = PDFDrawer(params, pdf, offset)
+    pdf.set_draw_color(r=0, g=0, b=0)
+    for e in entities:
+        drawer.draw_entity(e)
+
+def draw_grid_markers(pdf, params: Params, bb: Point, offset: Point):
+    drawer = PDFDrawer(params, pdf, offset)
     pdf.set_draw_color(200)
-
     bb_r = max(bb.x, bb.y)
     for i in range(math.ceil(params.scale*(bb.x+2*bb_r))+1):
         x1 = i/params.scale - bb_r
         x2 = x1 + bb_r
-        draw_line(x1, 0, x2, bb_r)
-        draw_line(x1, bb_r, x2, 0)
-
-    pdf.set_draw_color(r=0, g=0, b=0)
-    for e in entities:
-        if isinstance(e, Line):
-            draw_line(e.start.x, e.start.y, e.end.x, e.end.y)
-        if isinstance(e, Arc):
-            draw_arc(e)
-        if isinstance(e, Ellipse):
-            draw_ellipse(e)
-
+        drawer.draw_line(x1, 0, x2, bb_r)
+        drawer.draw_line(x1, bb_r, x2, 0)
+    
     num_cutsx = math.ceil(bb.x/params.cutx)
     num_cutsy = math.ceil(bb.y/params.cuty)
     for i in range(num_cutsx+1):
         for j in range(num_cutsy+1):
             x = i*params.cutx
             y = j*params.cuty
-            draw_line(x-0.25/params.scale, y, x+0.25/params.scale, y)
-            draw_line(x, y-0.25/params.scale, x, y+0.25/params.scale)
+            drawer.draw_line(x-0.25/params.scale, y, x+0.25/params.scale, y)
+            drawer.draw_line(x, y-0.25/params.scale, x, y+0.25/params.scale)
+
+
+# Function to check if a page is visually empty
+def analyze_pdf_for_empty_pages(pdf_path):
+    """Analyze a PDF and return a list of page indices that have visible content."""
+    # Create a temporary directory for image processing
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Convert PDF pages to images for visual analysis
+        images = convert_from_path(pdf_path, dpi=72, output_folder=temp_dir)
+        
+        non_empty_pages = []
+        
+        for page_idx, img in enumerate(images):
+            # Convert to grayscale for simpler analysis
+            gray_img = img.convert('L')
+            
+            # Get image statistics
+            stats = ImageStat.Stat(gray_img)
+            
+            # Check if the image is mostly white (255) with very little variation
+            mean_val = stats.mean[0]
+            stddev = stats.stddev[0]
+            
+            # Count non-white pixels (threshold slightly below 255 to account for compression artifacts)
+            non_white_count = 0
+            for pixel in gray_img.getdata():
+                if pixel < 250:  # Threshold for considering a pixel non-white
+                    non_white_count += 1
+            
+            # Calculate percentage of non-white pixels
+            total_pixels = gray_img.width * gray_img.height
+            non_white_percentage = (non_white_count / total_pixels) * 100
+            
+            is_empty = non_white_percentage < 0.1
+            
+            if not is_empty:
+                non_empty_pages.append(page_idx)
+        
+        return non_empty_pages
+
 
 def main():
     parser = argparse.ArgumentParser(description='Convert DXF to PDF')
@@ -232,7 +315,7 @@ def main():
     parser.add_argument('--pdf', required=True, type=str, help='PDF file to output')
     parser.add_argument('--scale', required=True, type=float, help='Scale factor')
     parser.add_argument('--overlap', type=float, default=0.5, help='Overlap factor')
-    parser.add_argument('--debug', action='store_true', help='Debug mode')
+    parser.add_argument('--debug', action='store_true', help='Debug mode with debugpy')
 
     args = parser.parse_args()
     if args.debug:
@@ -280,9 +363,14 @@ def main():
     print(f"Bounding box: {bb}")
     orientation = "landscape" if bb.tr.x > bb.tr.y else "portrait"
 
-    pdf = FPDF(orientation=orientation, unit="in", format="letter")
-    pdf.set_line_width(0.5/25.4)
-    pdf.set_font("Helvetica", "B", 8) 
+    def create_pdf():
+        pdf = FPDF(orientation=orientation, unit="in", format="letter")
+        pdf.set_line_width(0.5/25.4)
+        pdf.set_font("Helvetica", "B", 8)
+        return pdf
+    
+    pdf = create_pdf()
+    grid_pdf = create_pdf()
 
     params = Params(overlap=args.overlap, scale=args.scale, orientation=orientation)
     print(params)
@@ -292,6 +380,8 @@ def main():
     num_cutsy = math.ceil(bb.tr.y/params.cuty)
     print(f"cutx: {params.cutx}, cuty: {params.cuty}")
     print(f"Cutting into {num_cutsx} x {num_cutsy} pages")
+    
+    # Generate PDF with all pages
     for i in range(num_cutsx):
         for j in range(num_cutsy):
             x = i*params.cutx
@@ -299,18 +389,57 @@ def main():
 
             pdf.add_page()
             tol = 0.5/25.4
-            with pdf.rect_clip(params.margin-tol, params.margin-tol, 
-                               params.page_w+2*tol - 2*params.margin, 
+            with pdf.rect_clip(params.margin-tol, params.margin-tol,
+                               params.page_w+2*tol - 2*params.margin,
                                params.page_h+2*tol - 2*params.margin):
-                draw_page(params, entities, pdf, bb.tr, Point(-x, -y))
+                draw_page(params, entities, pdf, Point(-x, -y))
 
-            pdf.text(0.3, 0.4, text=f'({i}, {j})')
+            grid_pdf.add_page()
+            with grid_pdf.rect_clip(params.margin-tol, params.margin-tol,
+                                     params.page_w+2*tol - 2*params.margin,
+                                     params.page_h+2*tol - 2*params.margin):
+                draw_grid_markers(grid_pdf, params, bb.tr, Point(-x, -y))
+                grid_pdf.text(0.3, 0.4, text=f'({i}, {j})')
+    
+    # Save to a temporary file
+    temp_pdf_path = args.pdf.replace(".pdf", ".temp.pdf")
+    pdf.output(temp_pdf_path)
 
-    pdf.output(args.pdf)
+    grid_pdf_path = args.pdf.replace(".pdf", ".grid.pdf")
+    grid_pdf.output(grid_pdf_path)
+    
+    # Open the temporary PDF and filter out empty pages
+    with open(temp_pdf_path, 'rb') as file, open(grid_pdf_path, 'rb') as grid_file:
+        reader = PyPDF2.PdfReader(file)
+        grid_reader = PyPDF2.PdfReader(grid_file)
+        writer = PyPDF2.PdfWriter()
+        
+        # Analyze the PDF to find non-empty pages
+        print("Analyzing PDF pages for visible content...")
+        non_empty_pages = analyze_pdf_for_empty_pages(temp_pdf_path)
+        
+        # Add only non-empty pages to the new PDF
+        pages_kept = 0
+        pages_removed = 0
+        
+        for i, page_pair in enumerate(zip(reader.pages, grid_reader.pages)):
+            page, grid_page = page_pair
+            if i in non_empty_pages:
+                grid_page.merge_page(page)
+                writer.add_page(grid_page)
+                pages_kept += 1
+            else:
+                pages_removed += 1
+        
+        # Write the filtered PDF to the final output file
+        with open(args.pdf, 'wb') as output_file:
+            writer.write(output_file)
+    
+    # Remove the temporary file
+    os.remove(temp_pdf_path)
+    
+    print(f"Kept {pages_kept} pages, removed {pages_removed} empty pages")
 
-
-# arc = Arc(center=Point(x=2.999999999999995, y=39.27596614930593), r=30.7812500000007, start_angle=270.0, end_angle=273.7253958543048)
-# print(arc.bounds())
 
 if __name__ == "__main__":
     main()
